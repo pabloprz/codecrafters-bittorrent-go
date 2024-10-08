@@ -17,6 +17,22 @@ var _ = json.Marshal
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
 func decodeBencode(bencodedString string) (interface{}, error) {
+	if len(bencodedString) == 0 {
+		return nil, errors.New("found empty input")
+	}
+
+	if unicode.IsDigit(rune(bencodedString[0])) {
+		return decodeString(bencodedString)
+	}
+
+	if bencodedString[0] == 'i' {
+		return decodeInt(bencodedString)
+	}
+
+	return nil, errors.ErrUnsupported
+}
+
+func decodeString(bencodedString string) (interface{}, error) {
 	i := 0
 
 	for i = 0; i < len(bencodedString); i++ {
@@ -25,16 +41,12 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 		}
 	}
 
-	if i == 0 {
-		return nil, errors.New("was expecting an number, found something else")
-	}
-
 	length, err := strconv.Atoi(bencodedString[:i])
 	if err != nil {
 		return nil, err
 	}
 
-	if bencodedString[i] != ':' {
+	if i == len(bencodedString) || bencodedString[i] != ':' {
 		return nil, errors.New("was expecting a ':', found something else")
 	}
 
@@ -43,6 +55,31 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 	}
 
 	return bencodedString[i+1 : i+1+length], nil
+}
+
+func decodeInt(bencodedString string) (interface{}, error) {
+	i := 1
+
+	for ; i < len(bencodedString); i++ {
+		if i == 1 && bencodedString[i] == '-' {
+			continue
+		}
+
+		if !unicode.IsDigit(rune(bencodedString[i])) {
+			break
+		}
+	}
+
+	if i == len(bencodedString) || bencodedString[i] != 'e' {
+		return nil, errors.New("was expecting 'e' at end of integer, found something else")
+	}
+
+	decoded, err := strconv.Atoi(bencodedString[1:i])
+	if err != nil {
+		return nil, err
+	}
+
+	return decoded, nil
 }
 
 func main() {
