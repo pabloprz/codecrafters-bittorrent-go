@@ -40,7 +40,7 @@ func decodeBencode(bencodedString string) (interface{}, int, error) {
 	return nil, -1, errors.ErrUnsupported
 }
 
-func decodeDict(bencoded string) (interface{}, int, error) {
+func decodeDict(bencoded string) (map[string]interface{}, int, error) {
 	dict := make(map[string]interface{})
 
 	i := 1
@@ -167,6 +167,20 @@ func decodeInt(bencodedString string) (interface{}, int, error) {
 	return decoded, i + 1, nil
 }
 
+func parseTorrentFile(filePath string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	res, _, err := decodeDict(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
 func main() {
 	command := os.Args[1]
 
@@ -181,6 +195,24 @@ func main() {
 
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
+	} else if command == "info" {
+		torrentFilePath := os.Args[2]
+
+		infoFile, err := parseTorrentFile(torrentFilePath)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		fmt.Printf("Tracker URL: %s\n", infoFile["announce"])
+
+		info, ok := infoFile["info"].(map[string]interface{})
+
+		if ok {
+			fmt.Printf("Length: %d\n", info["length"])
+		} else {
+			fmt.Println("Error extracting length")
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
