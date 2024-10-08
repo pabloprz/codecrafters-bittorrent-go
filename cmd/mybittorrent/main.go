@@ -22,17 +22,68 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 	}
 
 	if unicode.IsDigit(rune(bencodedString[0])) {
-		return decodeString(bencodedString)
+		res, _, err := decodeString(bencodedString)
+		return res, err
 	}
 
 	if bencodedString[0] == 'i' {
-		return decodeInt(bencodedString)
+		res, _, err := decodeInt(bencodedString)
+		return res, err
+	}
+
+	if bencodedString[0] == 'l' {
+		res, _, err := decodeList(bencodedString)
+		return res, err
 	}
 
 	return nil, errors.ErrUnsupported
 }
 
-func decodeString(bencodedString string) (interface{}, error) {
+func decodeList(bencoded string) (interface{}, int, error) {
+	list := []interface{}{}
+	i := 1
+	for i < len(bencoded) {
+		if unicode.IsDigit(rune(bencoded[i])) {
+			str, end, err := decodeString(bencoded[i:])
+			if err != nil {
+				return nil, -1, err
+			}
+			i += end
+			list = append(list, str)
+			continue
+		}
+
+		if bencoded[i] == 'i' {
+			num, end, err := decodeInt(bencoded[i:])
+			if err != nil {
+				return nil, -1, err
+			}
+			i += end
+			list = append(list, num)
+			continue
+		}
+
+		if bencoded[i] == 'l' {
+			l, end, err := decodeList(bencoded[i:])
+			if err != nil {
+				return nil, -1, err
+			}
+			i += end
+			list = append(list, l)
+			continue
+		}
+
+		if bencoded[i] == 'e' {
+			return list, i + 1, nil
+		}
+
+		return nil, -1, errors.ErrUnsupported
+	}
+
+	return list, i + 1, nil
+}
+
+func decodeString(bencodedString string) (interface{}, int, error) {
 	i := 0
 
 	for i = 0; i < len(bencodedString); i++ {
@@ -43,21 +94,23 @@ func decodeString(bencodedString string) (interface{}, error) {
 
 	length, err := strconv.Atoi(bencodedString[:i])
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 
-	if i == len(bencodedString) || bencodedString[i] != ':' {
-		return nil, errors.New("was expecting a ':', found something else")
+	if i >= len(bencodedString) || bencodedString[i] != ':' {
+		return nil, -1, errors.New("was expecting a ':', found something else")
 	}
 
-	if i+1+length > len(bencodedString) {
-		return nil, errors.New("found end of input, was expecting more characters")
+	upto := i + 1 + length
+
+	if upto > len(bencodedString) {
+		return nil, -1, errors.New("found end of input, was expecting more characters")
 	}
 
-	return bencodedString[i+1 : i+1+length], nil
+	return bencodedString[i+1 : upto], upto, nil
 }
 
-func decodeInt(bencodedString string) (interface{}, error) {
+func decodeInt(bencodedString string) (interface{}, int, error) {
 	i := 1
 
 	for ; i < len(bencodedString); i++ {
@@ -70,16 +123,16 @@ func decodeInt(bencodedString string) (interface{}, error) {
 		}
 	}
 
-	if i == len(bencodedString) || bencodedString[i] != 'e' {
-		return nil, errors.New("was expecting 'e' at end of integer, found something else")
+	if i >= len(bencodedString) || bencodedString[i] != 'e' {
+		return nil, -1, errors.New("was expecting 'e' at end of integer, found something else")
 	}
 
 	decoded, err := strconv.Atoi(bencodedString[1:i])
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 
-	return decoded, nil
+	return decoded, i + 1, nil
 }
 
 func main() {
