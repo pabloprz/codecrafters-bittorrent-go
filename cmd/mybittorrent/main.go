@@ -16,27 +16,59 @@ var _ = json.Marshal
 // Example:
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
-func decodeBencode(bencodedString string) (interface{}, error) {
+func decodeBencode(bencodedString string) (interface{}, int, error) {
 	if len(bencodedString) == 0 {
-		return nil, errors.New("found empty input")
+		return nil, -1, errors.New("found empty input")
 	}
 
 	if unicode.IsDigit(rune(bencodedString[0])) {
-		res, _, err := decodeString(bencodedString)
-		return res, err
+		return decodeString(bencodedString)
 	}
 
 	if bencodedString[0] == 'i' {
-		res, _, err := decodeInt(bencodedString)
-		return res, err
+		return decodeInt(bencodedString)
 	}
 
 	if bencodedString[0] == 'l' {
-		res, _, err := decodeList(bencodedString)
-		return res, err
+		return decodeList(bencodedString)
 	}
 
-	return nil, errors.ErrUnsupported
+	if bencodedString[0] == 'd' {
+		return decodeDict(bencodedString)
+	}
+
+	return nil, -1, errors.ErrUnsupported
+}
+
+func decodeDict(bencoded string) (interface{}, int, error) {
+	dict := make(map[string]interface{})
+
+	i := 1
+	for i < len(bencoded) {
+		if bencoded[i] == 'e' {
+			return dict, i + 1, nil
+		}
+
+		if !unicode.IsDigit(rune(bencoded[i])) {
+			return nil, -1, errors.New("dictionary keys must be strings")
+		}
+
+		key, end, err := decodeString(bencoded[i:])
+		if err != nil {
+			return nil, -1, err
+		}
+		i += end
+
+		val, end, err := decodeBencode(bencoded[i:])
+		if err != nil {
+			return nil, -1, err
+		}
+		i += end
+
+		dict[key] = val
+	}
+
+	return dict, i + 1, nil
 }
 
 func decodeList(bencoded string) (interface{}, int, error) {
@@ -83,7 +115,7 @@ func decodeList(bencoded string) (interface{}, int, error) {
 	return list, i + 1, nil
 }
 
-func decodeString(bencodedString string) (interface{}, int, error) {
+func decodeString(bencodedString string) (string, int, error) {
 	i := 0
 
 	for i = 0; i < len(bencodedString); i++ {
@@ -94,17 +126,17 @@ func decodeString(bencodedString string) (interface{}, int, error) {
 
 	length, err := strconv.Atoi(bencodedString[:i])
 	if err != nil {
-		return nil, -1, err
+		return "", -1, err
 	}
 
 	if i >= len(bencodedString) || bencodedString[i] != ':' {
-		return nil, -1, errors.New("was expecting a ':', found something else")
+		return "", -1, errors.New("was expecting a ':', found something else")
 	}
 
 	upto := i + 1 + length
 
 	if upto > len(bencodedString) {
-		return nil, -1, errors.New("found end of input, was expecting more characters")
+		return "", -1, errors.New("found end of input, was expecting more characters")
 	}
 
 	return bencodedString[i+1 : upto], upto, nil
@@ -141,7 +173,7 @@ func main() {
 	if command == "decode" {
 		bencodedValue := os.Args[2]
 
-		decoded, err := decodeBencode(bencodedValue)
+		decoded, _, err := decodeBencode(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return
