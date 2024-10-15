@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -22,6 +24,7 @@ type TorrentInfo struct {
 	pieceLength int
 	pieces      []string
 	peers       []string
+	peerId      string
 }
 
 const (
@@ -29,10 +32,24 @@ const (
 	PEER_SIZE         = 6
 	PEER_ADDRESS_SIZE = 4
 	PEER_PORT_SIZE    = 2
+	PEER_ID_LENGTH    = 20
+	HANDSHAKE_SIZE    = 68
 )
 
 // Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
-var _ = json.Marshal
+var (
+	_       = json.Marshal
+	letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+)
+
+func generatePeerId() string {
+	b := make([]rune, 0, PEER_ID_LENGTH)
+	for range PEER_ID_LENGTH {
+		b = append(b, letters[rand.IntN(len(letters))])
+	}
+
+	return string(b)
+}
 
 func parseTorrentFile(filePath string) (map[string]interface{}, error) {
 	data, err := os.ReadFile(filePath)
@@ -79,6 +96,7 @@ func getTorrentInfo(torrentFilePath string) (*TorrentInfo, error) {
 		infoHash:    string(hasher.Sum(nil)),
 		pieceLength: info["piece length"].(int),
 		pieces:      make([]string, 0, len(pieces)/20),
+		peerId:      generatePeerId(),
 	}
 
 	for i := 0; i < len(pieces); i += 20 {
@@ -112,7 +130,7 @@ func getTorrentPeers(torrentInfo *TorrentInfo) (int, []string) {
 
 	q := req.URL.Query()
 	q.Add("info_hash", torrentInfo.infoHash)
-	q.Add("peer_id", "string_of_length_200")
+	q.Add("peer_id", torrentInfo.peerId)
 	q.Add("port", "6881")
 	q.Add("uploaded", "0")
 	q.Add("downloaded", "0")
@@ -163,6 +181,37 @@ func printPeers(torrentInfo *TorrentInfo) {
 	}
 }
 
+func handshake(peerAddr string, torrentInfo *TorrentInfo) []byte {
+	conn, err := net.Dial("tcp", peerAddr)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+
+	handshakePayload := []byte{byte(19)}
+	handshakePayload = append(handshakePayload, []byte("BitTorrent protocol")...)
+	handshakePayload = append(handshakePayload, make([]byte, 8)...) // 8 zeros
+	handshakePayload = append(handshakePayload, []byte(torrentInfo.infoHash)...)
+	handshakePayload = append(handshakePayload, []byte(torrentInfo.peerId)...)
+
+	_, err = conn.Write(handshakePayload)
+	if err != nil {
+		panic(err)
+	}
+
+	buff := make([]byte, HANDSHAKE_SIZE)
+	n := 0
+	for n < HANDSHAKE_SIZE {
+		read, err := conn.Read(buff)
+		if err != nil {
+			panic(err)
+		}
+		n += read
+	}
+
+	return buff[48:] // return peerId that starts on byte 48
+}
+
 func main() {
 	command := os.Args[1]
 
@@ -186,6 +235,12 @@ func main() {
 			panic(err)
 		}
 		printPeers(torrentInfo)
+	} else if command == "handshake" {
+		torrentInfo, err := getTorrentInfo(os.Args[2])
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("Peer ID: %x\n", handshake(os.Args[3], torrentInfo))
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
