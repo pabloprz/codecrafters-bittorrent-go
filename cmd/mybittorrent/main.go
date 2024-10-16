@@ -34,6 +34,13 @@ const (
 	PEER_PORT_SIZE    = 2
 	PEER_ID_LENGTH    = 20
 	HANDSHAKE_SIZE    = 68
+
+	BITFIELD_ID      = 5
+	INTERESTED_ID    = 2
+	UNCHOKE_ID       = 1
+	REQUEST_ID       = 6
+	PIECE_ID         = 7
+	PIECE_BLOCK_SIZE = 16 * 1024
 )
 
 // Ensures gofmt doesn't remove the "os" encoding/json import (feel free to remove this!)
@@ -181,35 +188,140 @@ func printPeers(torrentInfo *TorrentInfo) {
 	}
 }
 
-func handshake(peerAddr string, torrentInfo *TorrentInfo) []byte {
+func (torrentInfo *TorrentInfo) openPeerConnection(peerAddr string) net.Conn {
 	conn, err := net.Dial("tcp", peerAddr)
 	if err != nil {
 		panic(err)
 	}
-	defer conn.Close()
 
+	return conn
+}
+
+func (torrentInfo *TorrentInfo) handshake(conn net.Conn) []byte {
 	handshakePayload := []byte{byte(19)}
 	handshakePayload = append(handshakePayload, []byte("BitTorrent protocol")...)
 	handshakePayload = append(handshakePayload, make([]byte, 8)...) // 8 zeros
 	handshakePayload = append(handshakePayload, []byte(torrentInfo.infoHash)...)
 	handshakePayload = append(handshakePayload, []byte(torrentInfo.peerId)...)
 
-	_, err = conn.Write(handshakePayload)
+	_, err := conn.Write(handshakePayload)
 	if err != nil {
+		conn.Close()
 		panic(err)
 	}
 
-	buff := make([]byte, HANDSHAKE_SIZE)
+	buf := make([]byte, HANDSHAKE_SIZE)
 	n := 0
 	for n < HANDSHAKE_SIZE {
-		read, err := conn.Read(buff)
+		read, err := conn.Read(buf)
 		if err != nil {
+			conn.Close()
 			panic(err)
 		}
 		n += read
 	}
 
-	return buff[48:] // return peerId that starts on byte 48
+	return buf[48:]
+}
+
+func receiveMessage(conn net.Conn, messageId int) []byte {
+	// prefix contains the lenght of the payload
+	var payloadSize uint32
+	if err := binary.Read(conn, binary.BigEndian, &payloadSize); err != nil {
+		panic(err)
+	}
+
+	var id byte
+	if err := binary.Read(conn, binary.BigEndian, &id); err != nil {
+		panic(err)
+	}
+	if id != uint8(messageId) {
+		fmt.Println(id)
+		panic("unexpected message id")
+	}
+
+	if payloadSize > 1 {
+		payloadBuf := make([]byte, payloadSize-1) // -1 bc of id is already read
+		if _, err := io.ReadAtLeast(conn, payloadBuf, len(payloadBuf)); err != nil {
+			panic(err)
+		}
+		return payloadBuf
+	}
+
+	return nil
+}
+
+func sendMessage(conn net.Conn, messageId int, payload []byte) {
+	message := make([]byte, 4+1+len(payload))
+	binary.BigEndian.PutUint32(message[:4], uint32(len(payload)+1))
+	message[4] = byte(messageId)
+	copy(message[5:], payload)
+
+	if _, err := conn.Write(message); err != nil {
+		panic(err)
+	}
+}
+
+func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []byte {
+	// first, bitfield message (4 bytes prefix + 1 byte messageId)
+	receiveMessage(conn, BITFIELD_ID)
+
+	// now send the interested message (empty payload and size 1 (the messageId))
+	sendMessage(conn, INTERESTED_ID, nil)
+
+	// receive the unchoke message back (empty payload)
+	receiveMessage(conn, UNCHOKE_ID)
+
+	// last piece may not be full length
+	pieceLength := torrentInfo.pieceLength
+	if pieceIndex == len(torrentInfo.pieces)-1 {
+		pieceLength = torrentInfo.length - ((len(torrentInfo.pieces) - 1) * torrentInfo.pieceLength)
+	}
+
+	// last block may not be full length
+	nBlocks := pieceLength / PIECE_BLOCK_SIZE
+	lastBlockSize := pieceLength % PIECE_BLOCK_SIZE
+	if lastBlockSize != 0 {
+		nBlocks++
+	}
+
+	contents := make([]byte, pieceLength)
+	for i := range nBlocks {
+		blockLength := PIECE_BLOCK_SIZE
+		if i == nBlocks-1 && lastBlockSize > 0 {
+			blockLength = lastBlockSize
+		}
+
+		request := make([]byte, 3*4)
+		binary.BigEndian.PutUint32(request[:4], uint32(pieceIndex))          // index
+		binary.BigEndian.PutUint32(request[4:8], uint32(i*PIECE_BLOCK_SIZE)) // begin
+		binary.BigEndian.PutUint32(request[8:], uint32(blockLength))         // block size
+		sendMessage(conn, REQUEST_ID, request)
+
+		resp := receiveMessage(conn, PIECE_ID)
+		copy(contents[i*PIECE_BLOCK_SIZE:], resp[8:]) // the first 8 bytes of the response contain index and begin values
+	}
+
+	hasher := sha1.New()
+	hasher.Write(contents)
+	if string(hasher.Sum(nil)) != torrentInfo.pieces[pieceIndex] {
+		panic("downloaded hash does not match")
+	}
+	return contents
+}
+
+func writeToFile(content []byte, filePath string) {
+	file, err := os.Create(filePath)
+	if err != nil {
+		panic(err)
+	}
+
+	defer file.Close()
+
+	_, err = file.Write(content)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func main() {
@@ -240,7 +352,32 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("Peer ID: %x\n", handshake(os.Args[3], torrentInfo))
+
+		conn := torrentInfo.openPeerConnection(os.Args[3])
+		defer conn.Close()
+
+		peerId := torrentInfo.handshake(conn)
+		fmt.Printf("Peer ID: %x\n", peerId)
+	} else if command == "download_piece" {
+		torrentInfo, err := getTorrentInfo(os.Args[4])
+		if err != nil {
+			panic(err)
+		}
+
+		_, peers := getTorrentPeers(torrentInfo)
+		peer := peers[rand.IntN(len(peers))]
+
+		conn := torrentInfo.openPeerConnection(peer)
+		defer conn.Close()
+
+		torrentInfo.handshake(conn)
+
+		pieceIndex, err := strconv.Atoi(os.Args[5])
+		if err != nil {
+			panic(err)
+		}
+		pieceContents := torrentInfo.downloadPiece(conn, pieceIndex)
+		writeToFile(pieceContents, os.Args[3])
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
