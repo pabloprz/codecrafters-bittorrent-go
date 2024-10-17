@@ -262,7 +262,7 @@ func sendMessage(conn net.Conn, messageId int, payload []byte) {
 	}
 }
 
-func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []byte {
+func (torrentInfo *TorrentInfo) exchangeFirstMessages(conn net.Conn) {
 	// first, bitfield message (4 bytes prefix + 1 byte messageId)
 	receiveMessage(conn, BITFIELD_ID)
 
@@ -271,7 +271,9 @@ func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []b
 
 	// receive the unchoke message back (empty payload)
 	receiveMessage(conn, UNCHOKE_ID)
+}
 
+func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []byte {
 	// last piece may not be full length
 	pieceLength := torrentInfo.pieceLength
 	if pieceIndex == len(torrentInfo.pieces)-1 {
@@ -307,6 +309,23 @@ func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []b
 	if string(hasher.Sum(nil)) != torrentInfo.pieces[pieceIndex] {
 		panic("downloaded hash does not match")
 	}
+	return contents
+}
+
+func (torrentInfo *TorrentInfo) downloadTorrent() []byte {
+	_, peers := getTorrentPeers(torrentInfo)
+	peer := peers[rand.IntN(len(peers))]
+	conn := torrentInfo.openPeerConnection(peer)
+	defer conn.Close()
+
+	torrentInfo.handshake(conn)
+	torrentInfo.exchangeFirstMessages(conn)
+
+	contents := make([]byte, torrentInfo.length)
+	for i := range torrentInfo.pieces {
+		copy(contents[i*torrentInfo.pieceLength:], torrentInfo.downloadPiece(conn, i))
+	}
+
 	return contents
 }
 
@@ -376,8 +395,18 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
+
+		torrentInfo.exchangeFirstMessages(conn)
 		pieceContents := torrentInfo.downloadPiece(conn, pieceIndex)
 		writeToFile(pieceContents, os.Args[3])
+	} else if command == "download" {
+		torrentInfo, err := getTorrentInfo(os.Args[4])
+		if err != nil {
+			panic(err)
+		}
+
+		contents := torrentInfo.downloadTorrent()
+		writeToFile(contents, os.Args[3])
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
