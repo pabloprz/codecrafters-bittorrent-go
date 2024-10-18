@@ -454,11 +454,7 @@ func main() {
 		contents := torrentInfo.downloadTorrent()
 		writeToFile(contents, os.Args[3])
 	} else if command == "magnet_parse" {
-		magnet, err := utils.ParseMagnetLink(os.Args[2])
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("Tracker URL: %s\nInfo Hash: %s\n", magnet.TrackerUrl, magnet.InfoHash)
+		fmt.Println(utils.ParseMagnetLink(os.Args[2]))
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
