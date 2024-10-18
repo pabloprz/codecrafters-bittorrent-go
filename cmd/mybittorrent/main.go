@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"sync"
 
 	"github.com/codecrafters-io/bittorrent-starter-go/internal/utils"
 )
@@ -25,6 +26,11 @@ type TorrentInfo struct {
 	pieces      []string
 	peers       []string
 	peerId      string
+}
+
+type DownloadResult struct {
+	index    int
+	contents []byte
 }
 
 const (
@@ -312,7 +318,47 @@ func (torrentInfo *TorrentInfo) downloadPiece(conn net.Conn, pieceIndex int) []b
 	return contents
 }
 
+func (torrentInfo *TorrentInfo) runDownloadJob(peer string, pieces <-chan int, results chan<- *DownloadResult, wg *sync.WaitGroup) {
+	conn := torrentInfo.openPeerConnection(peer)
+	defer conn.Close()
+	torrentInfo.handshake(conn)
+	torrentInfo.exchangeFirstMessages(conn)
+
+	for piece := range pieces {
+		results <- &DownloadResult{piece, torrentInfo.downloadPiece(conn, piece)}
+	}
+
+	wg.Done()
+}
+
 func (torrentInfo *TorrentInfo) downloadTorrent() []byte {
+	_, peers := getTorrentPeers(torrentInfo)
+
+	pieces := make(chan int, len(torrentInfo.pieces))
+	results := make(chan *DownloadResult, len(torrentInfo.pieces))
+	var wg sync.WaitGroup
+
+	for _, peer := range peers {
+		go torrentInfo.runDownloadJob(peer, pieces, results, &wg)
+	}
+
+	wg.Add(len(peers))
+	for piece := range torrentInfo.pieces {
+		pieces <- piece
+	}
+	close(pieces)
+	wg.Wait()
+
+	contents := make([]byte, torrentInfo.length)
+	for range torrentInfo.pieces {
+		result := <-results
+		copy(contents[result.index*torrentInfo.pieceLength:], result.contents)
+	}
+
+	return contents
+}
+
+func (torrentInfo *TorrentInfo) downloadTorrentSerial() []byte {
 	_, peers := getTorrentPeers(torrentInfo)
 	peer := peers[rand.IntN(len(peers))]
 	conn := torrentInfo.openPeerConnection(peer)
@@ -407,6 +453,7 @@ func main() {
 
 		contents := torrentInfo.downloadTorrent()
 		writeToFile(contents, os.Args[3])
+	} else if command == "magnet_parse" {
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
